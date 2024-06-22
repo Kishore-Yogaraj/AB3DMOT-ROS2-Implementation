@@ -325,12 +325,12 @@ class TrackerNode(Node):
         timestamp = detections_msg.header.stamp
         frame_id = detections_msg.header.frame_id
 
-        detections = [] 		# [x, y, z, rot_y, l, w, h]
-        informations = []		# [class label, confidence score]
+        detections = [] 		# [x, y, z, rot_y, l, w, h] empty list to store 3d bouding box infroation for ecah detected obstacle
+        informations = []		# [class label, confidence score] empty list to store the classifcation informatio for each detected obstacels 
 
-        for detection in detections_msg.detections:
-            detections.append(ros_utils.obstacle_to_bbox(detection.bbox))
-            informations.append([detection.results[0].hypothesis.class_id, detection.results[0].hypothesis.score])
+        for detection in detections_msg.detections: #Iterates through each detection
+            detections.append(ros_utils.obstacle_to_bbox(detection.bbox)) # Converts the bonding box information from teh Detection3D message into the required format mentioned above for detections
+            informations.append([detection.results[0].hypothesis.class_id, detection.results[0].hypothesis.score]) #Extracts the calss lable of the first hypothesis from the detection results then extracts the confidence score and appends a list containg the class lale and confidece score to infromations list
 
         self.track(detections, informations, frame_id, timestamp)
 
