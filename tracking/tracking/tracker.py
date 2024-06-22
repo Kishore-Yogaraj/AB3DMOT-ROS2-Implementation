@@ -1,11 +1,16 @@
 #!/usr/bin/python3
+
+#Import of standard libararies
 import time
 import numpy as np
 
+#Yellow underline appearing beacause ros2 is not installed on the machine itself and ros2 extension is not installed
+# Message types that have been imported both custom and pre installed to be used in the node
 from vision_msgs.msg import Detection3DArray
 from tracking_msgs.msg import TrackedDetection3D, TrackedDetection3DArray
 
-from .core.ab3dmot import AB3DMOT
+#Packages created to be used within the node each with different functionalities
+from .core.ab3dmot import AB3DMOT  
 from .core.utils import ros_utils
 from .core.utils import geometry_utils
 from .core.utils.config import cfg, cfg_from_yaml_file, log_config_to_file
@@ -13,7 +18,48 @@ from .core.utils.config import cfg, cfg_from_yaml_file, log_config_to_file
 import rclpy
 from rclpy.node import Node
 
+# tf2 library is used for transformations of coordinate between frames. A good way to think about this is by thinking about a camera
+# that detects an object. We want the robot to move towards this object however the coordinates of this detections is in reference to 
+# the camera. We need to transform the coordinates to be in reference to the base of the robot so that the robot can actually
+# move towards the object. Thsese translations are set before hand based on measurements that were taken and linear algebra.
+
+# Buffer class is responsible for stroing transformations between different coordiante frames. It acts as a storgae for all the
+# transfomrations that are being publihser, allowing other parts of the systen to query the transformations as needed. Maintainsa  hsitory of trasnformations
+# Between frames. Provides methods to search the transformation between any two frames at a specific time or the latest available transfromation
+
+# The Buffer class stores different transforms. This allows for coordinates of one frame to be transformed to coordiantes of other frames
+# when needed. For example if the camera detects an object at a certain point and you need the coordinates in reference to the base frame then you
+# can use the buffer class to use the transforms that were stored for translating from camera frame to base frame. 
 from tf2_ros.buffer import Buffer
+
+# The TransformListener class listens to changes in transforms. In listens from the topics /tf for dynamic transformation and /tf_static for 
+# static transformation and updates it. For example if a robot arm starts at one point and it moves to another point, the transform between the arm
+# and the base will be different now. So the TransformListener ensures that the buffer gets this updated transformation.
+
+# The odometry sensor continuously provides updates on the robot's movement. The node the process these updates to calculate the new position and 
+# orientation of the base frame relative to the world frame. Whenever new odometry data is received, the broadcasts node updates the transfomration accordingly.
+
+"""
+The process is as follows:
+
+1. There are `tf2_ros.TransformBroadcaster` and `tf2_ros.StaticTransformBroadcaster` classes which are typically used in different nodes.
+   - `tf2_ros.TransformBroadcaster` is used for dynamic transformations that change over time.
+   - `tf2_ros.StaticTransformBroadcaster` is used for static transformations that do not change over time.
+
+2. These nodes are subscribed to specific odometry or relevant data.
+   - The nodes process the incoming data to apply the necessary updates to the transformation between two different frames.
+
+3. The new transformations are then published to the `/tf` and `/tf_static` topics respectively.
+   - Dynamic transformations are published to the `/tf` topic.
+   - Static transformations are published to the `/tf_static` topic.
+
+4. A node with the `tf2_ros.TransformListener` class will listen to these topics and obtain the updated transformations.
+
+5. The `TransformListener` class then sends the new transformations to the `tf2_ros.Buffer` class.
+   - The `Buffer` class stores the transformations, maintaining a history of transformations to be queried and used when needed.
+
+This process ensures that all nodes in the ROS2 system have access to accurate and up-to-date transformations, enabling reliable coordinate transformations and interactions within the robot's environment.
+"""
 from tf2_ros.transform_listener import TransformListener
 
 import copy
@@ -24,6 +70,9 @@ class TrackerNode(Node):
         super().__init__("tracker_node")
         self.get_logger().info("Creating object tracker node...")
 
+
+        # Parameters need to be declared before they can be used in ros2
+        # This basically means theat "camera_detections_topic" can be used instead of the hard coded name of the topic
         self.declare_parameter("camera_detections_topic", "/augmented_camera_detections")
         self.declare_parameter("lidar_detections_topic", "/lidar_detections")
         self.declare_parameter("tracked_detections_topic", "/tracked_detections")
@@ -37,7 +86,15 @@ class TrackerNode(Node):
         self.declare_parameter("default_distance_threshold", 3)
         self.declare_parameter("max_age", 5)
         self.declare_parameter("min_hits", 3)
+
+        # Odometery data is derived from multiple sensors such as wheel encoders, IMUs and sometimes visual sensors. These sensors provide
+        # which we then process to estimate the robot's position an dorientation over time. The process involves integrating this sensors
+        # data to track the robot's movement and roation whcih gives odometry estimate. Odometery data is essentially the combination
+        # of data from multiple sensors. Odometery data is essentially the base coordinate system we want all detected objects and 
+        # parts of the robot to be in
         self.declare_parameter("reference_frame", "odom")
+
+        # Declated without default values
         self.declare_parameter("~traffic_sign_class_names")
         self.declare_parameter("~obstacle_class_names")
         self.declare_parameter("frequency", 10)
@@ -59,6 +116,8 @@ class TrackerNode(Node):
         self.max_age = self.get_parameter("max_age").value
         self.min_hits = self.get_parameter("min_hits").value
         self.reference_frame = self.get_parameter("reference_frame").value
+
+        # Allows for parameter names in the params.yaml files to be accessed like a dictonary and used wherever neeed in the ros2 node
         cfg.TRAFFIC_SIGN_CLASSES = self.get_parameter("~traffic_sign_class_names").value
         cfg.OBSTACLE_CLASSES = self.get_parameter("~obstacle_class_names").value
         self.config_path = self.get_parameter("config_path").value
@@ -69,35 +128,54 @@ class TrackerNode(Node):
 
 
         # Initialize Tracker
+        # Initializes an instace of the tracker with parameters max age which is the maximum number of frames to go by before the track gets deleted
+        # Min hits which is th eminim number of detectiosn required before a track is published
+        # And a tracking name which is set to N/A right now
+        # This means that self.mot_tracker can use any method within the AB3DMOT class. It will also use 5 for the max age and use 3 for the min
+        # age because that is what was initialized in the node
         self.mot_tracker = AB3DMOT(max_age=self.max_age, 	# max age in seconds of a track before deletion
                                    min_hits=self.min_hits,	# min number of detections before publishing
                                    tracking_name="N/A") 	# default tracking age
 
         # Velocities for each track
+        # Initializes a dictionary that will map each tracked object's unique identifier or "track)id" to its velocity components
+        # As new detections are processed, the positions of the tracked objects are updated. The velocity for each object is recalculated based on the change in position over the time intervale between frames
         self.velocites = {}
+
         # low pass filter constant for velocity
+        # constant used for low pass filtering the velocity estiamtes to smooth out noise and get a more accurate velocity measurement
         self.velocity_filter_constant = self.get_parameter("velocity_filter_constant")
 
         # tf2 listener
+        # Creating instances of the buffer and listener to store and send information about updating transforms
         self.tf2_buffer = Buffer()
         self.tf2_listener = TransformListener(self.tf2_buffer, self)
 
         # Subscribers / Publishers
+
+        # Obstacle subscriber for detections. Will execute the obstacle call back everytime it receives a message
         self.obstacles_sub = self.create_subscription(
                  Detection3DArray, self.camera_detections_topic, self.obstacle_callback, 10)
-
+        
+        # Obstacle subscriber for lidar detections. Will execute the obstacle call back everytime it receives a message
         self.lidar_obstacles_sub = self.create_subscription(
                 Detection3DArray, self.lidar_detections_topic, self.lidar_obstacle_callback, 10)
-
+        
+        # Publisher that publishes the tracked array of from the detections
         self.tracked_obstacles_publisher = self.create_publisher(
                  TrackedDetection3DArray, self.tracked_detections_topic, 10)
-
+        
+        #Will publish messages from the publisher every 0.1 seconds
         self.tracked_obstacles_timer = self.create_timer(0.1, self.publish_tracks,)
 
         # tracked_signs_topic = '/tracked_signs'
         # self.tracked_signs_publisher = self.create_publisher(
         # 		tracked_signs_topic, TrafficSignListMsg, queue_size=10)
 
+
+    # This function is used to re initialize the tracker and creates a new instance of the AB3DMOT class with the same initialization parameters.
+    # This allows for the tracker to be reset whenenver needed
+        
     def reset(self):
         self.mot_tracker = AB3DMOT(max_age=self.max_age, 	# max age in seconds of a track before deletion
                                    min_hits=self.min_hits,	# min number of detections before publishing
@@ -140,6 +218,8 @@ class TrackerNode(Node):
         Outputs:
         - obstacles_2d: List[Obstacle], describing 2D bounding boxes
         """
+        # Check for empty obstalces list. If the obstacles list is empty, the function returns an empty list. This is a quick exit to avoid further processing 
+        # When there are no obstacles
         if not obstacles:
             return []
 
