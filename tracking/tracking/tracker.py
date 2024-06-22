@@ -239,6 +239,9 @@ class TrackerNode(Node):
     def obstacle_callback(self, detections_msg):
         start_time = time.time()
 
+        # Extract the timestamp and the frame ID from the message header
+        # timestamp indicates when the detction data was generated
+        # frame id indicates the coordinate frame in which the detections are provided
         timestamp = detections_msg.header.stamp
         frame_id = detections_msg.header.frame_id
 
