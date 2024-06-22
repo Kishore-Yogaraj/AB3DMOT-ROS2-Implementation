@@ -103,6 +103,36 @@ class TrackerNode(Node):
                                    min_hits=self.min_hits,	# min number of detections before publishing
                                    tracking_name="N/A") 	# default tracking age
 
+    # Function is used to converst a list of 3d obstacles into 2d bounding boxes, typically for visualization or further processing in 2d space.
+    # Obstacles is a list of 3d obstacels, each described as 3d cuboid (simply put a cuboid is just a rectangular prism drawn around 3d obstacles such as cars, trucks, etc. 
+    # the obstacles parameter will be a list of objects/instances with each one representing a 3d obstacle. An example will look like this:
+    """
+    obstacles = [
+    Obstacle(10, 20, 1, 4, 2, 1.5, 0.5),  # Obstacle 1
+    Obstacle(15, 25, 1, 3.5, 2.5, 1.2, 1.0),  # Obstacle 2
+    Obstacle(30, 10, 1, 4.2, 1.8, 1.6, 0.2)   # Obstacle 3
+    ]
+    """
+    # to_camera_transform is the transformation matrix (mathematical operation to perform transforms from different frames) that converts coordiantes from the
+    # 3d world to the camera frame. instrinsic_name is the name of the parameter that stores the camera's intrinsic matrix. An intrinsic matrix describes how your
+    # camera captures images using the focal lentgh and principal point. Let's say the robot's camera sees an apple at certain pixel coordinates in the image. To 
+    # interact with the apple (like picking it up), the robot needs to know the apple's position in the 3d world. Using the intrinsic matrix, the robot can transform
+    # the 2d image coordinates into 3d coordinates. The function retrieves the intrinsic matrix from a parameter server using the parameter name 'intrinsic_name'. In ROS
+    # a parameter server is a shared, multivaraible dictorinary that nodes use to store and retruieve paramtere at runtim. Parameters are typically set in configuration files or dynamically at run time.
+    # Here is an example of what setting this parameter in a YAML configuration file might look like:
+    """
+    camera:
+        right:
+            intrinsic: "800,0,320,0,800,240,0,0,1"  # Example intrinsic matrix values
+    """
+
+    """
+    So this function takes the detection from some sensors in which you'll get a list of obstacles. Each obstacle detected will then be an made object of the obstacle 
+    class which simply structures the object so that its easy to manipulate values such height, width, etc. Then the function takes these values and turns them and arranges 
+    them in way where a 3d bounding box could be constructed. Then it uses these 3d bounding box values to create a 3d bounding box which is just the top left coordinate and 
+    height and width. Then it assigns the values within this new 2d bounding box array to a value that can be easily used called obstacle_2d. Then it appends all of the 
+    obstacles to a list called obstacles_2d which hold arrays of the obstacles that represent a 2d bounding box. 
+    """
     def project_objects_2d(self, obstacles, to_camera_transform, intrinsic_name="/camera/right/intrinsic"):
         """
         Inputs:
@@ -115,30 +145,52 @@ class TrackerNode(Node):
 
         # Retrieve intrinsic matrix
         try:
+            # The function attempts to retrieve the intrinsic matrix and assign it to variable intrinsic matrix
             intrinsic_matrix = self.get_parameter(intrinsic_name)
         except:
+            # Otherwise it logs an error and returns an empty array
             self.get_logger().error("Can't find intrinsic matrix: {}".format(intrinsic_name))
             return []
         intrinsic_matrix = np.array(intrinsic_matrix.split(','), dtype=np.float64).reshape(3, -1)
 
         # Project obstacles to 2d
+
+        #Empty list to store the 2d representation of the 3d obstacles
         obstacles_2d = []
+
+        #Begins to loop over each obstacles that was detected in the obstacle list
         for obstacle in obstacles:
+
+            #Calls the function obstacle_to_bbox from ros_utilts to convert the obstalce into a 3d bounding box. The bounding box is a representation of the obstacle's dimensions and position.
+            # The obstacls class just assigns each value in teh array to a variable so that its weasier to work with and manipulate. The obstacle_to_bbox function then takes this structured object and 
+            # converts it into a format (array) that can used to draw a 3d bounding box
             bbox = ros_utils.obstacle_to_bbox(obstacle)
             try:
+                # This function projects a 3d bounding box into 2d space (turn a rectangular prism to a rectangle)
                 bbox_2d = geometry_utils.project_bbox_2d(bbox, to_camera_transform, intrinsic_matrix)
             except geometry_utils.ClippingError:
                 continue
+            # Creates a copy of the obstacle so that it doesn't make any changes to the original obstacle instance
             obstacle_2d = copy.deepcopy(obstacle)
+
+            # Updating all dimensions so that its mapped accordingly in the new list which is obstacls_2d
             obstacle_2d.pose.pose.position.x = bbox_2d[0]
             obstacle_2d.pose.pose.position.y = bbox_2d[1]
             obstacle_2d.pose.pose.position.z = 0
             obstacle_2d.width_along_x_axis = bbox_2d[2]
             obstacle_2d.height_along_y_axis = bbox_2d[3]
             obstacle_2d.depth_along_z_axis = 0
+            # Appends to the list
             obstacles_2d.append(obstacle_2d)
+            #Returns list after iterating through every obstacle
         return obstacles_2d
+    
 
+
+    # Purpose of this function is to update the tracking state with new detections. Detections is a list of detections, each defined by a list 
+    # of doubles representing the position, orientation, and dimensions. Informations is a list of lists containing class labels and confidence scores for each detections
+    # frame_id is the frame in which the detections are given (odom frame, base frame, etc.). Timestam is the timea at which the detections are given. update_only means only exisitng tracks are updated
+    # and new tracks are not created. distance_threshold is the threshold for associating detections with exisitng tracks based on distance
     def track(self, detections, informations, frame_id, timestamp, update_only=False, distance_threshold=None):
         """
         Update all trackers.
@@ -150,22 +202,38 @@ class TrackerNode(Node):
             update_only: Bool, only update tracks don't create new ones
             distance_threshold: euclidian distance threshold for association
         """
+
+        # If distace_threshhole is not provided then use the default value stored in the self.default_distance_threshold. In this case we want to use 3 because that is the default value
         if distance_threshold == None:
             distance_threshold = self.default_distance_threshold
 
 #		frame_id = "base_link"
+        # convert detections and informations to numpy arrays for easier maniuplation and processing. Detections are  [x, y, z, rz, w, l, h] which are the 3d detections isolated rz is yaw (rotation around z)
+        # info is all other information from the detections
         detections = np.array(detections)
         infos = np.array(informations, dtype=object)
 
         if (frame_id != self.reference_frame and frame_id != ""):
             try:
+                # Looks up the transformation from frame_id source frame to odom frame at the latest available time. Extracts the actual transforms (translation and rotations from the results TrasnformStamped message)
+                # Suppose you have detections in the "caerma_frame" and you want to transform them to the "odom" frame. The lookup_transfomr method will give you the transfmration needed to convert coordinates from camera_frame to odom 
+                # frame. This try will always execute becasue the frame id is most likely in the camera frame and we want all detections to be in the reference frame
                 bbox_to_reference_transform = self.tf2_buffer.lookup_transform(self.reference_frame, frame_id, rclpy.time.Time(), rclpy.time.Duration(0.1)).transform
             except:
                 self.get_logger().error("Failed to look up transform from {} to {}".format(self.reference_frame, frame_id))
                 return
-
+            
+            # Function that takes a list of 3d boudning boxes ('detections') and tra transformation bbox_to_reference_transfomr and applies the transformations to each bounding box
+            # This line actually applies the transformation to the 3d detection coordinates so you have new coordinates in the odom frame
             detections = geometry_utils.transform_boxes(detections, bbox_to_reference_transform)
 
+        # Calls the update method of the AB3DMOT class to update the state of the tracker with new detections.
+        # Numpy array of the new detections is detections. Info is a numpy array of additional information for each detections such as calss lables and confidence scores. timestamp to sec is the timestamp of the detections in seconds
+        # update only is a boolean flag indicating whether to only update exisitng tracks without creatingnew ones. #Distance threshold is a value for associatng detections with existing tracks
+        # The update function is what actually updates the trackers. So the value returned is an array with either new detections for tracked values or new 3d detections. 
+        # Kalman filter predicts the next state of the tracker and the euclidean distance is used to measure the distance between the new detection and track. 
+        # If there was 3 tracks and 3 predictions from the kalman filter and 3 new detections. The hungarian algorithm would attempt to match each detection with each prediciton that minimizes the euclidean distance (costs) 
+        # between the predicted positions of tracks andnew detections. The Hungarian algorithm is crucial in the object tracking process because initially, we don't know which detection corresponds to which track
         self.mot_tracker.update(detections, infos, timestamp.to_sec(), update_only, distance_threshold)
 
     def obstacle_callback(self, detections_msg):
